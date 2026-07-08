@@ -7,13 +7,12 @@ use std::{
     borrow::Cow,
     fmt,
     fs::Metadata,
-    iter,
+    io, iter,
     iter::{once, repeat},
     mem,
     path::{Component, Path, PathBuf},
     str,
 };
-use tokio::io;
 
 use crate::{other, EntryType};
 

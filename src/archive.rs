@@ -1,3 +1,4 @@
+use futures_core::Stream;
 use portable_atomic::{AtomicU64, Ordering};
 use rustc_hash::FxHashSet;
 use std::{
@@ -8,14 +9,9 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::{
-    fs,
-    io::{self, AsyncRead as Read, AsyncReadExt},
-    sync::Mutex,
-};
-use tokio_stream::*;
 
 use crate::{
+    backend::{fs, io, repeat, AsyncReadExt, Mutex, Read, StreamExt},
     entry::{EntryFields, EntryIo, PaxOwnerName},
     error::TarError,
     other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
@@ -268,8 +264,11 @@ impl<R: Read + Unpin> Archive<R> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
+    /// #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    /// use async_fs::File;
+    /// #[cfg(all(feature = "tokio", not(feature = "futures")))]
     /// use tokio::fs::File;
-    /// use tokio_tar::Archive;
+    /// use astral_futures_tar::Archive;
     ///
     /// let mut ar = Archive::new(File::open("foo.tar").await?);
     /// ar.unpack("foo").await?;
@@ -977,7 +976,7 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
                      blocks",
                 ));
             } else if cur < off {
-                let block = io::repeat(0).take(off - cur);
+                let block = repeat(0).take(off - cur);
                 data.push_back(EntryIo::Pad(block));
             }
             cur = off
@@ -1046,10 +1045,11 @@ fn poll_parse_sparse_header<R: Read + Unpin>(
 }
 
 impl<R: Read + Unpin> Read for Archive<R> {
+    #[cfg(all(feature = "tokio", not(feature = "futures")))]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        into: &mut io::ReadBuf<'_>,
+        into: &mut crate::backend::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let mut r = if let Ok(v) = self.inner.obj.try_lock() {
             v
@@ -1068,6 +1068,46 @@ impl<R: Read + Unpin> Read for Archive<R> {
             Err(err) => Poll::Ready(Err(err)),
         }
     }
+
+    #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        into: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let mut r = if let Some(v) = self.inner.obj.try_lock() {
+            v
+        } else {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        };
+
+        let n = futures_core::ready!(Pin::new(&mut *r).poll_read(cx, into))?;
+        self.inner.pos.fetch_add(n as u64, Ordering::SeqCst);
+        Poll::Ready(Ok(n))
+    }
+}
+
+#[cfg(all(feature = "tokio", not(feature = "futures")))]
+fn poll_read_buf<R: Read + Unpin>(
+    mut source: Pin<&mut R>,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let mut read_buf = crate::backend::ReadBuf::new(buf);
+    match futures_core::ready!(source.as_mut().poll_read(cx, &mut read_buf)) {
+        Ok(()) => Poll::Ready(Ok(read_buf.filled().len())),
+        Err(err) => Poll::Ready(Err(err)),
+    }
+}
+
+#[cfg(all(feature = "futures", not(feature = "tokio")))]
+fn poll_read_buf<R: Read + Unpin>(
+    source: Pin<&mut R>,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    source.poll_read(cx, buf)
 }
 
 /// Try to fill the buffer from the reader.
@@ -1081,16 +1121,15 @@ fn poll_try_read_all<R: Read + Unpin>(
     pos: &mut usize,
 ) -> Poll<io::Result<bool>> {
     while *pos < buf.len() {
-        let mut read_buf = io::ReadBuf::new(&mut buf[*pos..]);
-        match futures_core::ready!(Pin::new(&mut source).poll_read(cx, &mut read_buf)) {
-            Ok(()) if read_buf.filled().is_empty() => {
+        match futures_core::ready!(poll_read_buf(Pin::new(&mut source), cx, &mut buf[*pos..])) {
+            Ok(0) => {
                 if *pos == 0 {
                     return Poll::Ready(Ok(false));
                 }
 
                 return Poll::Ready(Err(other("failed to read entire block")));
             }
-            Ok(()) => *pos += read_buf.filled().len(),
+            Ok(n) => *pos += n,
             Err(err) => return Poll::Ready(Err(err)),
         }
     }
@@ -1108,14 +1147,15 @@ fn poll_skip<R: Read + Unpin>(
     let mut buf = [0u8; 4096 * 8];
     while amt > 0 {
         let n = cmp::min(amt, buf.len() as u64);
-        let mut read_buf = io::ReadBuf::new(&mut buf[..n as usize]);
-        match futures_core::ready!(Pin::new(&mut source).poll_read(cx, &mut read_buf)) {
-            Ok(()) if read_buf.filled().is_empty() => {
+        match futures_core::ready!(poll_read_buf(
+            Pin::new(&mut source),
+            cx,
+            &mut buf[..n as usize],
+        )) {
+            Ok(0) => {
                 return Poll::Ready(Err(other("unexpected EOF during skip")));
             }
-            Ok(()) => {
-                amt -= read_buf.filled().len() as u64;
-            }
+            Ok(n) => amt -= n as u64,
             Err(err) => return Poll::Ready(Err(err)),
         }
     }

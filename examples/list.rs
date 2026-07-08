@@ -2,7 +2,7 @@
 //!
 //! Takes a tarball on stdin and prints out all of the entries inside.
 
-extern crate tokio_tar as async_tar;
+extern crate astral_futures_tar as async_tar;
 
 use tokio::io::stdin;
 use tokio_stream::*;

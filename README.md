@@ -1,6 +1,37 @@
-# `astral-tokio-tar`
+# `astral-futures-tar`
 
-A `tokio`-based tar archive reader and writer.
+An async tar archive reader and writer with selectable Tokio and futures backends.
+
+## Features
+
+Tokio remains the default backend:
+
+```toml
+astral-futures-tar = "0.6"
+```
+
+For no-Tokio builds, disable default features and enable the futures backend:
+
+```toml
+astral-futures-tar = { version = "0.6", default-features = false, features = ["futures"] }
+```
+
+The `tokio` and `futures` features are mutually exclusive. The futures backend uses
+`async-fs` for filesystem helpers and `futures-lite` I/O traits and combinators.
+
+When using the futures backend, call `finish()` or `into_inner()` on `Builder` to write
+archive termination bytes. Tokio builds keep the historical best-effort drop-time
+termination behavior, but futures builds do not block or spawn hidden executor work from
+`Drop`.
+
+## Performance Smoke Tests
+
+Ignored `Instant`-based performance tests are available for backend comparisons:
+
+```sh
+cargo test --release perf -- --ignored --nocapture
+cargo test --release --no-default-features --features futures perf -- --ignored --nocapture
+```
 
 ## Provenance
 

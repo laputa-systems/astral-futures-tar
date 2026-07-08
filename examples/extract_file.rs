@@ -4,7 +4,7 @@
 //! name as the first argument provided, and then prints the contents of that
 //! file to stdout.
 
-extern crate tokio_tar as async_tar;
+extern crate astral_futures_tar as async_tar;
 
 use std::{env::args_os, path::Path};
 use tokio::io::{copy, stdin, stdout};

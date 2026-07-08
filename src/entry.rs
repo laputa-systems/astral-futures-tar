@@ -1,6 +1,14 @@
 use crate::fs::normalize;
 use crate::{
-    error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
+    backend::{
+        copy, fs, io, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, File, OpenOptions,
+        Read, Repeat, Take,
+    },
+    error::TarError,
+    header::bytes2path,
+    other,
+    pax::pax_extensions,
+    Archive, Header, PaxExtensions,
 };
 use rustc_hash::FxHashSet;
 use std::{
@@ -18,14 +26,14 @@ use std::{
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    fs,
-    fs::{remove_file, OpenOptions},
-    io::{self, AsyncRead as Read, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-};
 
 fn set_file_times(file: &std::fs::File, mtime: SystemTime) -> io::Result<()> {
     file.set_times(FileTimes::new().set_accessed(mtime).set_modified(mtime))
+}
+
+fn set_file_times_path(dst: &Path, mtime: SystemTime) -> io::Result<()> {
+    let file = std::fs::OpenOptions::new().write(true).open(dst)?;
+    set_file_times(&file, mtime)
 }
 
 #[cfg(windows)]
@@ -174,8 +182,8 @@ impl<R: Read + Unpin> fmt::Debug for EntryFields<R> {
 }
 
 pub enum EntryIo<R: Read + Unpin> {
-    Pad(io::Take<io::Repeat>),
-    Data(io::Take<R>),
+    Pad(Take<Repeat>),
+    Data(Take<R>),
 }
 
 impl<R: Read + Unpin> fmt::Debug for EntryIo<R> {
@@ -194,7 +202,7 @@ impl<R: Read + Unpin> fmt::Debug for EntryIo<R> {
 #[non_exhaustive]
 pub enum Unpacked {
     /// A file was unpacked.
-    File(fs::File),
+    File(File),
     /// A directory, hardlink, symlink, or other node was unpacked.
     Other,
 }
@@ -382,9 +390,12 @@ impl<R: Read + Unpin> Entry<R> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
+    /// #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    /// use async_fs::File;
+    /// #[cfg(all(feature = "tokio", not(feature = "futures")))]
     /// use tokio::fs::File;
-    /// use tokio_tar::Archive;
-    /// use tokio_stream::*;
+    /// use astral_futures_tar::Archive;
+    /// use futures_lite::StreamExt;
     ///
     /// let mut ar = Archive::new(File::open("foo.tar").await?);
     /// let mut entries = ar.entries()?;
@@ -417,9 +428,12 @@ impl<R: Read + Unpin> Entry<R> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio::{fs::File, stream::*};
-    /// use tokio_tar::Archive;
-    /// use tokio_stream::*;
+    /// #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    /// use async_fs::File;
+    /// #[cfg(all(feature = "tokio", not(feature = "futures")))]
+    /// use tokio::fs::File;
+    /// use astral_futures_tar::Archive;
+    /// use futures_lite::StreamExt;
     ///
     /// let mut ar = Archive::new(File::open("foo.tar").await?);
     /// let mut entries = ar.entries()?;
@@ -490,11 +504,21 @@ impl<R: Read + Unpin> Entry<R> {
 }
 
 impl<R: Read + Unpin> Read for Entry<R> {
+    #[cfg(all(feature = "tokio", not(feature = "futures")))]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        into: &mut io::ReadBuf<'_>,
+        into: &mut crate::backend::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.as_mut().fields).poll_read(cx, into)
+    }
+
+    #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        into: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.as_mut().fields).poll_read(cx, into)
     }
 }
@@ -855,7 +879,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     Ok(()) => Ok(()),
                     Err(err) => {
                         if err.kind() == io::ErrorKind::AlreadyExists && self.overwrite {
-                            match remove_file(dst).await {
+                            match fs::remove_file(dst).await {
                                 Ok(()) => symlink(&normalized_src, dst).await,
                                 Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
                                     symlink(&normalized_src, dst).await
@@ -885,15 +909,29 @@ impl<R: Read + Unpin> EntryFields<R> {
 
             #[cfg(windows)]
             async fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
-                let (src, dst) = (src.to_owned(), dst.to_owned());
-                tokio::task::spawn_blocking(|| std::os::windows::fs::symlink_file(src, dst))
-                    .await
-                    .unwrap()
+                #[cfg(all(feature = "tokio", not(feature = "futures")))]
+                {
+                    let (src, dst) = (src.to_owned(), dst.to_owned());
+                    tokio::task::spawn_blocking(|| std::os::windows::fs::symlink_file(src, dst))
+                        .await
+                        .unwrap()
+                }
+                #[cfg(all(feature = "futures", not(feature = "tokio")))]
+                {
+                    async_fs::windows::symlink_file(src, dst).await
+                }
             }
 
             #[cfg(unix)]
             async fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
-                tokio::fs::symlink(src, dst).await
+                #[cfg(all(feature = "tokio", not(feature = "futures")))]
+                {
+                    tokio::fs::symlink(src, dst).await
+                }
+                #[cfg(all(feature = "futures", not(feature = "tokio")))]
+                {
+                    async_fs::unix::symlink(src, dst).await
+                }
             }
         } else if kind.is_pax_global_extensions()
             || self.header.is_pax_local_extensions()
@@ -927,7 +965,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         // Ensure we write a new file rather than overwriting in-place which
         // is attackable; if an existing file is found unlink it.
-        async fn open(dst: &Path) -> io::Result<fs::File> {
+        async fn open(dst: &Path) -> io::Result<File> {
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -953,12 +991,12 @@ impl<R: Read + Unpin> EntryFields<R> {
 
             let size = usize::try_from(self.size).unwrap_or(usize::MAX);
             let capacity = cmp::min(size, 128 * 1024);
-            let mut writer = io::BufWriter::with_capacity(capacity, &mut f);
+            let mut writer = BufWriter::with_capacity(capacity, &mut f);
             for io in self.data.drain(..) {
                 match io {
                     EntryIo::Data(mut d) => {
                         let expected = d.limit();
-                        if io::copy(&mut d, &mut writer).await? != expected {
+                        if copy(&mut d, &mut writer).await? != expected {
                             return Err(other("failed to write entire file"));
                         }
                     }
@@ -973,7 +1011,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 }
             }
             writer.flush().await?;
-            Ok::<fs::File, io::Error>(f)
+            Ok::<File, io::Error>(f)
         }
         .await
         .map_err(|e| {
@@ -990,11 +1028,9 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         if self.preserve_mtime {
             if let Some(mtime) = get_mtime(&self.header)? {
-                let file = f.into_std().await;
-                set_file_times(&file, mtime).map_err(|e| {
+                set_file_times_path(dst, mtime).map_err(|e| {
                     TarError::new(format!("failed to set mtime for `{}`", dst.display()), e)
                 })?;
-                f = fs::File::from_std(file);
             }
         }
         if self.preserve_permissions {
@@ -1007,11 +1043,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
         return Ok(Unpacked::File(f));
 
-        async fn set_perms(
-            dst: &Path,
-            f: Option<&mut fs::File>,
-            mode: u32,
-        ) -> Result<(), TarError> {
+        async fn set_perms(dst: &Path, f: Option<&mut File>, mode: u32) -> Result<(), TarError> {
             _set_perms(dst, f, mode).await.map_err(|e| {
                 TarError::new(
                     format!(
@@ -1026,7 +1058,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
 
         #[cfg(unix)]
-        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut File>, mode: u32) -> io::Result<()> {
             use std::os::unix::prelude::*;
 
             let perm = std::fs::Permissions::from_mode(mode as _);
@@ -1037,7 +1069,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
 
         #[cfg(windows)]
-        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut File>, mode: u32) -> io::Result<()> {
             if mode & 0o200 == 0o200 {
                 return Ok(());
             }
@@ -1057,7 +1089,7 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         #[cfg(target_arch = "wasm32")]
         #[allow(unused_variables)]
-        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
+        async fn _set_perms(dst: &Path, f: Option<&mut File>, mode: u32) -> io::Result<()> {
             Err(io::Error::new(io::ErrorKind::Other, "Not implemented"))
         }
 
@@ -1113,7 +1145,7 @@ impl<R: Read + Unpin> EntryFields<R> {
     async fn ensure_dir_created(&self, dst: &Path, dir: &Path) -> io::Result<()> {
         let mut ancestor = dir;
         let mut dirs_to_create = Vec::new();
-        while tokio::fs::symlink_metadata(ancestor).await.is_err() {
+        while fs::symlink_metadata(ancestor).await.is_err() {
             dirs_to_create.push(ancestor);
             if let Some(parent) = ancestor.parent() {
                 ancestor = parent;
@@ -1154,69 +1186,136 @@ impl<R: Read + Unpin> EntryFields<R> {
 }
 
 impl<R: Read + Unpin> Read for EntryFields<R> {
+    #[cfg(all(feature = "tokio", not(feature = "futures")))]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        into: &mut io::ReadBuf<'_>,
+        into: &mut crate::backend::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if into.remaining() == 0 {
-            return Poll::Ready(Ok(()));
+        match futures_core::ready!(poll_read_entry_fields(self, cx, into.initialize_unfilled())) {
+            Ok(n) => {
+                into.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
+    #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        into: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        poll_read_entry_fields(self, cx, into)
+    }
+}
+
+fn poll_read_entry_fields<R: Read + Unpin>(
+    self_: Pin<&mut EntryFields<R>>,
+    cx: &mut Context<'_>,
+    into: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let this = self_.get_mut();
+    if into.is_empty() {
+        return Poll::Ready(Ok(0));
+    }
+
+    loop {
+        if this.read_state.is_none() {
+            this.read_state = this.data.pop_front();
         }
 
-        loop {
-            if this.read_state.is_none() {
-                this.read_state = this.data.pop_front();
-            }
-
-            if let Some(ref mut io) = &mut this.read_state {
-                let expected_data = match io {
-                    EntryIo::Data(reader) => reader.limit() > 0,
-                    EntryIo::Pad(_) => false,
-                };
-                let start = into.filled().len();
-                let ret = Pin::new(io).poll_read(cx, into);
-                match ret {
-                    Poll::Ready(Ok(())) if into.filled().len() == start => {
-                        if expected_data {
-                            return Poll::Ready(Err(other(
-                                "unexpected EOF while reading archive entry data",
-                            )));
-                        }
-                        this.read_state = None;
-                        if this.data.is_empty() {
-                            return Poll::Ready(Ok(()));
-                        }
-                        continue;
+        if let Some(ref mut io) = &mut this.read_state {
+            let expected_data = match io {
+                EntryIo::Data(reader) => reader.limit() > 0,
+                EntryIo::Pad(_) => false,
+            };
+            let ret = poll_read_entry_io(Pin::new(io), cx, into);
+            match ret {
+                Poll::Ready(Ok(0)) => {
+                    if expected_data {
+                        return Poll::Ready(Err(other(
+                            "unexpected EOF while reading archive entry data",
+                        )));
                     }
-                    Poll::Ready(Ok(())) => {
-                        return Poll::Ready(Ok(()));
+                    this.read_state = None;
+                    if this.data.is_empty() {
+                        return Poll::Ready(Ok(0));
                     }
-                    Poll::Ready(Err(err)) => {
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
+                    continue;
                 }
-            } else {
-                // Unable to pull another value from `data`, so we are done.
-                return Poll::Ready(Ok(()));
+                Poll::Ready(Ok(n)) => return Poll::Ready(Ok(n)),
+                Poll::Ready(Err(err)) => {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
             }
+        } else {
+            // Unable to pull another value from `data`, so we are done.
+            return Poll::Ready(Ok(0));
         }
     }
 }
 
 impl<R: Read + Unpin> Read for EntryIo<R> {
+    #[cfg(all(feature = "tokio", not(feature = "futures")))]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        into: &mut io::ReadBuf<'_>,
+        into: &mut crate::backend::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            EntryIo::Pad(ref mut io) => Pin::new(io).poll_read(cx, into),
-            EntryIo::Data(ref mut io) => Pin::new(io).poll_read(cx, into),
+        match futures_core::ready!(poll_read_entry_io(self, cx, into.initialize_unfilled())) {
+            Ok(n) => {
+                into.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(err) => Poll::Ready(Err(err)),
         }
+    }
+
+    #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        into: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        poll_read_entry_io(self, cx, into)
+    }
+}
+
+#[cfg(all(feature = "tokio", not(feature = "futures")))]
+fn poll_read_buf<R: Read + ?Sized>(
+    mut source: Pin<&mut R>,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let mut read_buf = crate::backend::ReadBuf::new(buf);
+    match futures_core::ready!(source.as_mut().poll_read(cx, &mut read_buf)) {
+        Ok(()) => Poll::Ready(Ok(read_buf.filled().len())),
+        Err(err) => Poll::Ready(Err(err)),
+    }
+}
+
+#[cfg(all(feature = "futures", not(feature = "tokio")))]
+fn poll_read_buf<R: Read + ?Sized>(
+    source: Pin<&mut R>,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    source.poll_read(cx, buf)
+}
+
+fn poll_read_entry_io<R: Read + Unpin>(
+    self_: Pin<&mut EntryIo<R>>,
+    cx: &mut Context<'_>,
+    into: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    match self_.get_mut() {
+        EntryIo::Pad(ref mut io) => poll_read_buf(Pin::new(io), cx, into),
+        EntryIo::Data(ref mut io) => poll_read_buf(Pin::new(io), cx, into),
     }
 }
 
@@ -1255,13 +1354,12 @@ fn poll_read_all_internal<R: Read + ?Sized>(
             }
         }
 
-        let mut read_buf = io::ReadBuf::new(&mut g.buf[g.len..]);
-        match futures_core::ready!(rd.as_mut().poll_read(cx, &mut read_buf)) {
-            Ok(()) if read_buf.filled().is_empty() => {
+        match futures_core::ready!(poll_read_buf(rd.as_mut(), cx, &mut g.buf[g.len..])) {
+            Ok(0) => {
                 ret = Poll::Ready(Ok(g.len));
                 break;
             }
-            Ok(()) => g.len += read_buf.filled().len(),
+            Ok(n) => g.len += n,
             Err(e) => {
                 ret = Poll::Ready(Err(e));
                 break;

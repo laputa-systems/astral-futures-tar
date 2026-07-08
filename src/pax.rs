@@ -1,6 +1,6 @@
 use std::str;
 
-use tokio::io;
+use std::io;
 
 use crate::other;
 

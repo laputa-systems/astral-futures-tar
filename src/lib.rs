@@ -20,8 +20,18 @@
 #![deny(missing_docs)]
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 
+#[cfg(all(feature = "tokio", feature = "futures"))]
+compile_error!("features `tokio` and `futures` are mutually exclusive");
+
+#[cfg(not(any(feature = "tokio", feature = "futures")))]
+compile_error!("either feature `tokio` or feature `futures` must be enabled");
+
 use std::io::Error;
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures", not(feature = "tokio"))
+))]
 pub use crate::{
     archive::{Archive, ArchiveBuilder, Entries},
     builder::Builder,
@@ -34,8 +44,25 @@ pub use crate::{
     pax::{PaxExtension, PaxExtensions},
 };
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures", not(feature = "tokio"))
+))]
 mod archive;
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures", not(feature = "tokio"))
+))]
+mod backend;
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures", not(feature = "tokio"))
+))]
 mod builder;
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures", not(feature = "tokio"))
+))]
 mod entry;
 mod entry_type;
 mod error;

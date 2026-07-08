@@ -1,12 +1,11 @@
+#[cfg(all(feature = "futures", not(feature = "tokio")))]
+use crate::backend::StreamExt;
 use crate::{
+    backend::{copy, empty, fs, io, repeat, AsyncReadExt, AsyncWriteExt, File, Read, Write},
     header::{path2bytes, HeaderMode},
     other, EntryType, Header,
 };
 use std::{fs::Metadata, path::Path, str};
-use tokio::{
-    fs,
-    io::{self, AsyncRead as Read, AsyncReadExt, AsyncWrite as Write, AsyncWriteExt},
-};
 
 /// A structure for building archives
 ///
@@ -17,11 +16,14 @@ pub struct Builder<W: Write + Unpin + Send> {
     follow: bool,
     finished: bool,
     obj: Option<W>,
+    #[cfg(all(feature = "tokio", not(feature = "futures")))]
     cancellation: Option<tokio::sync::oneshot::Sender<W>>,
 }
 
+#[cfg(all(feature = "tokio", not(feature = "futures")))]
 const TERMINATION: &[u8; 1024] = &[0; 1024];
 
+#[cfg(all(feature = "tokio", not(feature = "futures")))]
 impl<W: Write + Unpin + Send + 'static> Builder<W> {
     /// Create a new archive builder with the underlying object as the
     /// destination of all data written. The builder will use
@@ -46,6 +48,25 @@ impl<W: Write + Unpin + Send + 'static> Builder<W> {
     }
 }
 
+#[cfg(all(feature = "futures", not(feature = "tokio")))]
+impl<W: Write + Unpin + Send> Builder<W> {
+    /// Create a new archive builder with the underlying object as the
+    /// destination of all data written. The builder will use
+    /// `HeaderMode::Complete` by default.
+    ///
+    /// Unlike the Tokio backend, the futures backend cannot write termination
+    /// bytes on drop. Call [`Builder::finish`] or [`Builder::into_inner`] to
+    /// finish the archive.
+    pub fn new(obj: W) -> Builder<W> {
+        Builder {
+            mode: HeaderMode::Complete,
+            follow: true,
+            finished: false,
+            obj: Some(obj),
+        }
+    }
+}
+
 impl<W: Write + Unpin + Send> Builder<W> {
     /// Create a new archive builder with the underlying object as the
     /// destination of all data written. The builder will use
@@ -58,6 +79,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
             follow: true,
             finished: false,
             obj: Some(obj),
+            #[cfg(all(feature = "tokio", not(feature = "futures")))]
             cancellation: None,
         }
     }
@@ -77,6 +99,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
 
     /// Skip writing final termination bytes into the archive.
     pub fn skip_termination(&mut self) {
+        #[cfg(all(feature = "tokio", not(feature = "futures")))]
         drop(self.cancellation.take());
     }
 
@@ -132,7 +155,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio_tar::{Builder, Header};
+    /// use astral_futures_tar::{Builder, Header};
     ///
     /// let mut header = Header::new_gnu();
     /// header.set_path("foo")?;
@@ -187,7 +210,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio_tar::{Builder, Header};
+    /// use astral_futures_tar::{Builder, Header};
     ///
     /// let mut header = Header::new_gnu();
     /// header.set_size(4);
@@ -234,7 +257,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio_tar::Builder;
+    /// use astral_futures_tar::Builder;
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
@@ -268,7 +291,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
-    /// use tokio_tar::Builder;
+    /// use astral_futures_tar::Builder;
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
@@ -314,8 +337,11 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
+    /// #[cfg(all(feature = "futures", not(feature = "tokio")))]
+    /// use async_fs::File;
+    /// #[cfg(all(feature = "tokio", not(feature = "futures")))]
     /// use tokio::fs::File;
-    /// use tokio_tar::Builder;
+    /// use astral_futures_tar::Builder;
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
@@ -329,7 +355,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     pub async fn append_file<P: AsRef<Path>>(
         &mut self,
         path: P,
-        file: &mut fs::File,
+        file: &mut File,
     ) -> io::Result<()> {
         let mode = self.mode;
         append_file(self.get_mut(), path.as_ref(), file, mode).await?;
@@ -355,7 +381,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
     /// use tokio::fs;
-    /// use tokio_tar::Builder;
+    /// use astral_futures_tar::Builder;
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
@@ -391,7 +417,7 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// #
     /// use tokio::fs;
-    /// use tokio_tar::Builder;
+    /// use astral_futures_tar::Builder;
     ///
     /// let mut ar = Builder::new(Vec::new());
     ///
@@ -444,7 +470,7 @@ async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
     mut data: &mut Data,
 ) -> io::Result<()> {
     dst.write_all(header.as_bytes()).await?;
-    let len = io::copy(&mut data, &mut dst).await?;
+    let len = copy(&mut data, &mut dst).await?;
 
     // Pad with zeros if necessary.
     let buf = [0; 512];
@@ -484,26 +510,18 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
             dst,
             ar_name,
             &stat,
-            &mut fs::File::open(path).await?,
+            &mut File::open(path).await?,
             mode,
             None,
         )
         .await?;
         Ok(())
     } else if stat.is_dir() {
-        append_fs(dst, ar_name, &stat, &mut io::empty(), mode, None).await?;
+        append_fs(dst, ar_name, &stat, &mut empty(), mode, None).await?;
         Ok(())
     } else if stat.file_type().is_symlink() {
         let link_name = fs::read_link(path).await?;
-        append_fs(
-            dst,
-            ar_name,
-            &stat,
-            &mut io::empty(),
-            mode,
-            Some(&link_name),
-        )
-        .await?;
+        append_fs(dst, ar_name, &stat, &mut empty(), mode, Some(&link_name)).await?;
         Ok(())
     } else {
         #[cfg(unix)]
@@ -564,7 +582,7 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
 async fn append_file<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
-    file: &mut fs::File,
+    file: &mut File,
     mode: HeaderMode,
 ) -> io::Result<()> {
     let stat = file.metadata().await?;
@@ -579,7 +597,7 @@ async fn append_dir<Dst: Write + Unpin + ?Sized>(
     mode: HeaderMode,
 ) -> io::Result<()> {
     let stat = fs::metadata(src_path).await?;
-    append_fs(dst, path, &stat, &mut io::empty(), mode, None).await?;
+    append_fs(dst, path, &stat, &mut empty(), mode, None).await?;
     Ok(())
 }
 
@@ -617,7 +635,7 @@ async fn prepare_header_path<Dst: Write + Unpin + ?Sized>(
         }
         let header2 = prepare_header(data.len() as u64, EntryType::GNULongName);
         // null-terminated string
-        let mut data2 = data.chain(io::repeat(0).take(1));
+        let mut data2 = data.chain(repeat(0).take(1));
         append(dst, &header2, &mut data2).await?;
 
         // Truncate the path to store in the header we're about to emit to
@@ -646,7 +664,7 @@ async fn prepare_header_link<Dst: Write + Unpin + ?Sized>(
             return Err(e);
         }
         let header2 = prepare_header(data.len() as u64, EntryType::GNULongLink);
-        let mut data2 = data.chain(io::repeat(0).take(1));
+        let mut data2 = data.chain(repeat(0).take(1));
         append(dst, &header2, &mut data2).await?;
     }
     Ok(())
@@ -687,7 +705,14 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
         // In case of a symlink pointing to a directory, is_dir is false, but src.is_dir() will return true
         if is_dir || (is_symlink && follow && src.is_dir()) {
             let mut entries = fs::read_dir(&src).await?;
+            #[cfg(all(feature = "tokio", not(feature = "futures")))]
             while let Some(entry) = entries.next_entry().await.transpose() {
+                let entry = entry?;
+                let file_type = entry.file_type().await?;
+                stack.push((entry.path(), file_type.is_dir(), file_type.is_symlink()));
+            }
+            #[cfg(all(feature = "futures", not(feature = "tokio")))]
+            while let Some(entry) = entries.next().await {
                 let entry = entry?;
                 let file_type = entry.file_type().await?;
                 stack.push((entry.path(), file_type.is_dir(), file_type.is_symlink()));
@@ -698,7 +723,7 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
         } else if !follow && is_symlink {
             let stat = fs::symlink_metadata(&src).await?;
             let link_name = fs::read_link(&src).await?;
-            append_fs(dst, &dest, &stat, &mut io::empty(), mode, Some(&link_name)).await?;
+            append_fs(dst, &dest, &stat, &mut empty(), mode, Some(&link_name)).await?;
         } else {
             #[cfg(unix)]
             {
@@ -708,7 +733,7 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
                     continue;
                 }
             }
-            append_file(dst, &dest, &mut fs::File::open(src).await?, mode).await?;
+            append_file(dst, &dest, &mut File::open(src).await?, mode).await?;
         }
     }
     Ok(())
@@ -716,10 +741,13 @@ async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
 
 impl<W: Write + Unpin + Send> Drop for Builder<W> {
     fn drop(&mut self) {
-        // TODO: proper async cancellation
-        if !self.finished {
-            if let Some(cancellation) = self.cancellation.take() {
-                cancellation.send(self.obj.take().unwrap()).ok();
+        #[cfg(all(feature = "tokio", not(feature = "futures")))]
+        {
+            // TODO: proper async cancellation
+            if !self.finished {
+                if let Some(cancellation) = self.cancellation.take() {
+                    cancellation.send(self.obj.take().unwrap()).ok();
+                }
             }
         }
     }
