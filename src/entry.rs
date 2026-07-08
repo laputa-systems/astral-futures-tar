@@ -1,8 +1,7 @@
 use crate::fs::normalize;
 use crate::{
     backend::{
-        copy, fs, io, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, File, OpenOptions,
-        Read, Repeat, Take,
+        copy, io, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, Read, Repeat, Take,
     },
     error::TarError,
     header::bytes2path,
@@ -10,6 +9,12 @@ use crate::{
     pax::pax_extensions,
     Archive, Header, PaxExtensions,
 };
+
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
+use crate::backend::{fs, File, OpenOptions};
 use rustc_hash::FxHashSet;
 use std::{
     borrow::Cow,
@@ -200,6 +205,10 @@ impl<R: Read + Unpin> fmt::Debug for EntryIo<R> {
 /// the enum may be extended with kinds for links, directories etc.
 #[derive(Debug)]
 #[non_exhaustive]
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 pub enum Unpacked {
     /// A file was unpacked.
     File(File),
@@ -408,6 +417,10 @@ impl<R: Read + Unpin> Entry<R> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn unpack<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Unpacked> {
         self.fields.unpack(None, dst.as_ref()).await
     }
@@ -446,6 +459,10 @@ impl<R: Read + Unpin> Entry<R> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn unpack_in<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<Option<PathBuf>> {
         let dst = dst.as_ref().canonicalize()?;
         let mut memo = FxHashSet::default();
@@ -457,6 +474,10 @@ impl<R: Read + Unpin> Entry<R> {
     /// Like [`unpack_in`], but memoizes the set of validated paths to avoid
     /// redundant filesystem operations and assumes that the destination path
     /// is already canonicalized.
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn unpack_in_raw<P: AsRef<Path>>(
         &mut self,
         dst: P,
@@ -648,6 +669,10 @@ impl<R: Read + Unpin> EntryFields<R> {
     ///
     /// It's assumed that `dst` is already canonicalized, and that the memoized set of validated
     /// paths are tied to `dst`.
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     async fn unpack_in(
         &mut self,
         dst: &Path,
@@ -734,6 +759,10 @@ impl<R: Read + Unpin> EntryFields<R> {
     }
 
     /// Unpack as destination directory `dst`.
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     async fn unpack_dir(&mut self, dst: &Path) -> io::Result<()> {
         // If the directory already exists just let it slide
         match fs::create_dir(dst).await {
@@ -754,6 +783,10 @@ impl<R: Read + Unpin> EntryFields<R> {
     }
 
     /// Returns access to the header of this entry in the archive.
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     async fn unpack(&mut self, target_base: Option<&Path>, dst: &Path) -> io::Result<Unpacked> {
         fn get_mtime(header: &Header) -> io::Result<Option<SystemTime>> {
             let Ok(mtime) = header.mtime() else {
@@ -916,7 +949,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                         .await
                         .unwrap()
                 }
-                #[cfg(all(feature = "futures", not(feature = "tokio")))]
+                #[cfg(all(feature = "futures-fs", not(feature = "tokio")))]
                 {
                     async_fs::windows::symlink_file(src, dst).await
                 }
@@ -928,7 +961,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                 {
                     tokio::fs::symlink(src, dst).await
                 }
-                #[cfg(all(feature = "futures", not(feature = "tokio")))]
+                #[cfg(all(feature = "futures-fs", not(feature = "tokio")))]
                 {
                     async_fs::unix::symlink(src, dst).await
                 }
@@ -1142,6 +1175,10 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
     }
 
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     async fn ensure_dir_created(&self, dst: &Path, dir: &Path) -> io::Result<()> {
         let mut ancestor = dir;
         let mut dirs_to_create = Vec::new();
@@ -1162,6 +1199,10 @@ impl<R: Read + Unpin> EntryFields<R> {
         Ok(())
     }
 
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     async fn validate_inside_dst(&self, dst: &Path, file_dst: &Path) -> io::Result<()> {
         // Abort if target (canonical) parent is outside of `dst`
         let canon_parent = file_dst.canonicalize().map_err(|err| {

@@ -19,6 +19,10 @@
 
 #![deny(missing_docs)]
 #![deny(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    all(feature = "futures", not(feature = "futures-fs"), not(feature = "tokio")),
+    allow(dead_code, unused_imports)
+)]
 
 #[cfg(all(feature = "tokio", feature = "futures"))]
 compile_error!("features `tokio` and `futures` are mutually exclusive");
@@ -35,7 +39,7 @@ use std::io::Error;
 pub use crate::{
     archive::{Archive, ArchiveBuilder, Entries},
     builder::Builder,
-    entry::{Entry, Unpacked},
+    entry::Entry,
     entry_type::EntryType,
     error::TarError,
     header::{
@@ -43,6 +47,12 @@ pub use crate::{
     },
     pax::{PaxExtension, PaxExtensions},
 };
+
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
+pub use crate::entry::Unpacked;
 
 #[cfg(any(
     all(feature = "tokio", not(feature = "futures")),

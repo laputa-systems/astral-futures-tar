@@ -45,7 +45,8 @@ xattr = { version = "1.0", optional = true }
 
 [features]
 default = ["tokio", "xattr"]
-futures = ["dep:async-fs", "dep:async-lock", "dep:futures-lite"]
+futures = ["dep:async-lock", "dep:futures-lite"]
+futures-fs = ["futures", "dep:async-fs"]
 tokio = ["dep:tokio", "dep:tokio-stream"]
 
 [lib]

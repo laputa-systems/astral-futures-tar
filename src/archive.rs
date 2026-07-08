@@ -1,22 +1,33 @@
 use futures_core::Stream;
 use portable_atomic::{AtomicU64, Ordering};
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 use rustc_hash::FxHashSet;
 use std::{
     cmp,
     collections::VecDeque,
-    path::Path,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
 use crate::{
-    backend::{fs, io, repeat, AsyncReadExt, Mutex, Read, StreamExt},
+    backend::{io, repeat, AsyncReadExt, Mutex, Read},
     entry::{EntryFields, EntryIo, PaxOwnerName},
-    error::TarError,
     other, Entry, GnuExtSparseHeader, GnuSparseHeader, Header,
 };
 use crate::{header::BLOCK_SIZE, pax::pax_extensions};
+
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
+use {
+    crate::{backend::fs, backend::StreamExt, error::TarError},
+    std::path::Path,
+};
 
 /// A top-level representation of an archive file.
 ///
@@ -275,6 +286,10 @@ impl<R: Read + Unpin> Archive<R> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn unpack<P: AsRef<Path>>(&mut self, dst: P) -> io::Result<()> {
         let mut entries = self.entries()?;
         let mut pinned = Pin::new(&mut entries);

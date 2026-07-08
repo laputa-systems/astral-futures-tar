@@ -1,11 +1,35 @@
-#[cfg(all(feature = "futures", not(feature = "tokio")))]
+#[cfg(all(feature = "futures-fs", not(feature = "tokio")))]
 use crate::backend::StreamExt;
 use crate::{
-    backend::{copy, empty, fs, io, repeat, AsyncReadExt, AsyncWriteExt, File, Read, Write},
+    backend::{copy, io, repeat, AsyncReadExt, AsyncWriteExt, Read, Write},
     header::{path2bytes, HeaderMode},
-    other, EntryType, Header,
+    EntryType, Header,
 };
-use std::{fs::Metadata, path::Path, str};
+use std::{path::Path, str};
+
+#[cfg(all(
+    unix,
+    any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    )
+))]
+use std::fs::Metadata;
+
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
+use crate::backend::{empty, fs, File};
+
+#[cfg(all(
+    unix,
+    any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    )
+))]
+use crate::other;
 
 /// A structure for building archives
 ///
@@ -237,6 +261,30 @@ impl<W: Write + Unpin + Send> Builder<W> {
         Ok(())
     }
 
+    /// Adds a link entry to this archive with the specified path and link target.
+    ///
+    /// This is like [`Builder::append_data`], but also writes a GNU long-link
+    /// extension entry when the link target does not fit in a standard header.
+    pub async fn append_link_data<P, L, R>(
+        &mut self,
+        header: &mut Header,
+        path: P,
+        link_name: L,
+        data: R,
+    ) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        L: AsRef<Path>,
+        R: Read + Unpin,
+    {
+        prepare_header_path(self.get_mut(), header, path.as_ref()).await?;
+        prepare_header_link(self.get_mut(), header, link_name.as_ref()).await?;
+        header.set_cksum();
+        self.append(header, data).await?;
+
+        Ok(())
+    }
+
     /// Adds a file on the local filesystem to this archive.
     ///
     /// This function will open the file specified by `path` and insert the file
@@ -265,6 +313,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn append_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
         let mode = self.mode;
         let follow = self.follow;
@@ -301,6 +353,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn append_path_with_name<P: AsRef<Path>, N: AsRef<Path>>(
         &mut self,
         path: P,
@@ -352,6 +408,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn append_file<P: AsRef<Path>>(
         &mut self,
         path: P,
@@ -391,6 +451,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn append_dir<P, Q>(&mut self, path: P, src_path: Q) -> io::Result<()>
     where
         P: AsRef<Path>,
@@ -429,6 +493,10 @@ impl<W: Write + Unpin + Send> Builder<W> {
     /// #
     /// # Ok(()) }) }
     /// ```
+    #[cfg(any(
+        all(feature = "tokio", not(feature = "futures")),
+        all(feature = "futures-fs", not(feature = "tokio"))
+    ))]
     pub async fn append_dir_all<P, Q>(&mut self, path: P, src_path: Q) -> io::Result<()>
     where
         P: AsRef<Path>,
@@ -482,6 +550,10 @@ async fn append<Dst: Write + Unpin + ?Sized, Data: Read + Unpin + ?Sized>(
     Ok(())
 }
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -536,6 +608,10 @@ async fn append_path_with_name<Dst: Write + Unpin + ?Sized>(
 }
 
 #[cfg(unix)]
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_special<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -579,6 +655,10 @@ async fn append_special<Dst: Write + Unpin + ?Sized>(
     Ok(())
 }
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_file<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -590,6 +670,10 @@ async fn append_file<Dst: Write + Unpin + ?Sized>(
     Ok(())
 }
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_dir<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -670,6 +754,10 @@ async fn prepare_header_link<Dst: Write + Unpin + ?Sized>(
     Ok(())
 }
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_fs<Dst: Write + Unpin + ?Sized, R: Read + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
@@ -691,6 +779,10 @@ async fn append_fs<Dst: Write + Unpin + ?Sized, R: Read + Unpin + ?Sized>(
     Ok(())
 }
 
+#[cfg(any(
+    all(feature = "tokio", not(feature = "futures")),
+    all(feature = "futures-fs", not(feature = "tokio"))
+))]
 async fn append_dir_all<Dst: Write + Unpin + ?Sized>(
     dst: &mut Dst,
     path: &Path,
